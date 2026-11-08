@@ -228,7 +228,7 @@ def parse_people_lines(raw):
         line = line.strip()
         if not line:
             continue
-        match = re.match(r"^(.+?)\s+(\d{1,2}(?::|\.?)\d{0,2})$", line)
+        match = re.match(r"^(.+?)\s+(?:к\s+)?(\d{1,2}(?::|\.?)\d{0,2})$", line, flags=re.IGNORECASE)
         if not match:
             errors.append(f"Строка {number}: «{line}» — нужен формат Фамилия 07:00")
             continue
@@ -362,7 +362,7 @@ async def add_people_message(message: Message, state: FSMContext):
         for name, start in parsed:
             await db.execute(
                 "INSERT INTO people(user_id,name,time,answered,created_at,end_time,workspace_id) VALUES(?,?,?,?,?,?,?)",
-                (message.from_user.id, name, start, 0, datetime.now(TZ).isoformat(), wid)
+                (message.from_user.id, name, start, 0, datetime.now(TZ).isoformat(), None, wid)
             )
         await db.commit()
     await state.clear()
@@ -629,6 +629,14 @@ async def confirm_multi_delete_cb(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text(f"🗑 Удалено записей: {len(ids)}.", reply_markup=main_menu())
     await call.answer()
+
+
+@dp.message(F.text)
+async def add_people_direct(message: Message, state: FSMContext):
+    # Allow entering a name and start time without pressing the Add button.
+    if (message.text or "").startswith("/"):
+        return
+    await add_people_message(message, state)
 
 
 async def main():

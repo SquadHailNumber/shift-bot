@@ -81,6 +81,20 @@ def format_duration(minutes):
     return " ".join(parts) if parts else "0 минут"
 
 
+def rounded_work_minutes(minutes):
+    """0–9 => 0, 10–30 => 30, 31–59 => 60 minutes."""
+    hours, remainder = divmod(minutes, 60)
+    return hours * 60 + (0 if remainder < 10 else 30 if remainder <= 30 else 60)
+
+
+def format_work_duration(minutes):
+    rounded = rounded_work_minutes(minutes)
+    hours, remainder = divmod(rounded, 60)
+    if remainder == 30:
+        return f"{hours},5 часа" if hours else "0,5 часа"
+    return f"{hours} {plural(hours, 'час', 'часа', 'часов')}"
+
+
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить людей списком", callback_data="add")],
@@ -177,7 +191,7 @@ async def fetch_people(workspace_id, pending=False):
 def person_line(row):
     status = "✅" if row["answered"] else "⬜"
     if row["end_time"]:
-        duration = format_duration(minutes_between(row["time"], row["end_time"]))
+        duration = format_work_duration(minutes_between(row["time"], row["end_time"]))
         work = f"до {row['end_time']} / {duration}"
     else:
         work = "ещё работает"
@@ -187,10 +201,11 @@ def person_line(row):
 def person_keyboard(row):
     pid = row["id"]
     toggle = "Снять ✅" if row["answered"] else "Отметить: ответил ✅"
-    finish = "🔄 Изменить окончание" if row["end_time"] else "🏁 Закончил работу сейчас"
+    finish = "🔄 Обновить окончание на сейчас" if row["end_time"] else "🏁 Закончил работу сейчас"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=toggle, callback_data=f"toggle:{pid}")],
         [InlineKeyboardButton(text=finish, callback_data=f"finish:{pid}")],
+        *([[InlineKeyboardButton(text="↩️ Отменить завершение", callback_data=f"unfinish:{pid}")]] if row["end_time"] else []),
         [InlineKeyboardButton(text="✏️ Изменить фамилию", callback_data=f"editname:{pid}")],
         [InlineKeyboardButton(text="🕒 Изменить время прихода", callback_data=f"editstart:{pid}")],
         [InlineKeyboardButton(text="🕒 Изменить время окончания", callback_data=f"editend:{pid}")],
@@ -204,11 +219,11 @@ async def render_list(workspace_id, pending=False):
     if not rows:
         return ("Нет людей, ожидающих ответа." if pending else "Пока записей нет."), None
     title = "⏳ <b>Кто не ответил</b>" if pending else "📋 <b>Все люди</b>"
-    text = title + "\n\n" + "\n".join(person_line(r) for r in rows)
+    text = title + "\n\n" + "\n".join(f"{i}. {person_line(r)}" for i, r in enumerate(rows, 1))
     buttons = [[InlineKeyboardButton(
-        text=f"{'✅' if r['answered'] else '⬜'} {r['name']} · {r['time']}",
+        text=f"{i}. {'✅' if r['answered'] else '⬜'} {r['name']} · {r['time']}",
         callback_data=f"person:{r['id']}"
-    )] for r in rows]
+    )] for i, r in enumerate(rows, 1)]
     buttons.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")])
     return text, InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -389,7 +404,7 @@ async def person_cb(call: CallbackQuery):
         return
     status = "Ответил ✅" if row["answered"] else "Не ответил ⬜"
     end = row["end_time"] or "не указано"
-    duration = format_duration(minutes_between(row["time"], row["end_time"])) if row["end_time"] else "ещё работает"
+    duration = format_work_duration(minutes_between(row["time"], row["end_time"])) if row["end_time"] else "ещё работает"
     await call.message.edit_text(
         f"<b>{row['name']}</b>\nПриход: {row['time']}\nОкончание: {end}\n"
         f"Отработано: {duration}\nСтатус ответа: {status}",
@@ -403,7 +418,7 @@ async def refresh_person(call, pid):
     if row:
         status = "Ответил ✅" if row["answered"] else "Не ответил ⬜"
         end = row["end_time"] or "не указано"
-        duration = format_duration(minutes_between(row["time"], row["end_time"])) if row["end_time"] else "ещё работает"
+        duration = format_work_duration(minutes_between(row["time"], row["end_time"])) if row["end_time"] else "ещё работает"
         await call.message.edit_text(
             f"<b>{row['name']}</b>\nПриход: {row['time']}\nОкончание: {end}\n"
             f"Отработано: {duration}\nСтатус ответа: {status}",
@@ -439,6 +454,24 @@ async def finish_cb(call: CallbackQuery):
                          (end, pid, await get_workspace_id(call.from_user.id)))
         await db.commit()
     await call.answer(f"Окончание записано: {end}")
+    await refresh_person(call, pid)
+
+
+@dp.callback_query(F.data.startswith("unfinish:"))
+async def unfinish_cb(call: CallbackQuery):
+    pid = int(call.data.split(":")[1])
+    wid = await get_workspace_id(call.from_user.id)
+    row = await get_person(pid, wid)
+    if not row:
+        await call.answer("Запись не найдена.", show_alert=True)
+        return
+    if row["end_time"] is None:
+        await call.answer("Смена уже отмечена как незавершённая.")
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE people SET end_time=NULL WHERE id=? AND workspace_id=?", (pid, wid))
+        await db.commit()
+    await call.answer("Завершение отменено.")
     await refresh_person(call, pid)
 
 
@@ -534,17 +567,17 @@ async def summary_cb(call: CallbackQuery):
     lines = []
     total_minutes = 0
     finished = 0
-    for row in rows:
+    for i, row in enumerate(rows, 1):
         if row["end_time"]:
             mins = minutes_between(row["time"], row["end_time"])
-            total_minutes += mins
+            total_minutes += rounded_work_minutes(mins)
             finished += 1
-            lines.append(f"<b>{row['name']}</b> к {row['time']} до {row['end_time']} / {format_duration(mins)}")
+            lines.append(f"{i}. <b>{row['name']}</b> к {row['time']} до {row['end_time']} / {format_work_duration(mins)}")
         else:
-            lines.append(f"<b>{row['name']}</b> к {row['time']} — ещё работает")
+            lines.append(f"{i}. <b>{row['name']}</b> к {row['time']} — ещё работает")
     text = "📊 <b>Итог смены</b>\n\n" + "\n".join(lines)
     text += f"\n\nЗавершили: {finished} из {len(rows)}"
-    text += f"\nСуммарно отработано: {format_duration(total_minutes)}"
+    text += f"\nСуммарно отработано (с округлением): {format_work_duration(total_minutes)}"
     await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Обновить итог", callback_data="summary")],
         [InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")]

@@ -189,13 +189,14 @@ async def fetch_people(workspace_id, pending=False):
 
 
 def person_line(row):
-    status = "✅" if row["answered"] else "⬜"
+    status = "✔️" if row["end_time"] else ("✅" if row["answered"] else "⬜")
     if row["end_time"]:
         duration = format_work_duration(minutes_between(row["time"], row["end_time"]))
         work = f"до {row['end_time']} / {duration}"
     else:
-        work = "ещё работает"
-    return f"{status} <b>{row['name']}</b> к {row['time']} — {work}"
+        work = None
+    suffix = f" {work}" if work else ""
+    return f"{status} <b>{row['name']}</b> к {row['time']}{suffix}"
 
 
 def person_keyboard(row):
@@ -221,7 +222,7 @@ async def render_list(workspace_id, pending=False):
     title = "⏳ <b>Кто не ответил</b>" if pending else "📋 <b>Все люди</b>"
     text = title + "\n\n" + "\n".join(f"{i}. {person_line(r)}" for i, r in enumerate(rows, 1))
     buttons = [[InlineKeyboardButton(
-        text=f"{i}. {'✅' if r['answered'] else '⬜'} {r['name']} · {r['time']}",
+        text=f"{i}. {'✔️' if r['end_time'] else ('✅' if r['answered'] else '⬜')} {r['name']} · {r['time']}",
         callback_data=f"person:{r['id']}"
     )] for i, r in enumerate(rows, 1)]
     buttons.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="menu")])
@@ -572,9 +573,9 @@ async def summary_cb(call: CallbackQuery):
             mins = minutes_between(row["time"], row["end_time"])
             total_minutes += rounded_work_minutes(mins)
             finished += 1
-            lines.append(f"{i}. <b>{row['name']}</b> к {row['time']} до {row['end_time']} / {format_work_duration(mins)}")
+            lines.append(f"{i}. ✔️ <b>{row['name']}</b> к {row['time']} до {row['end_time']} / {format_work_duration(mins)}")
         else:
-            lines.append(f"{i}. <b>{row['name']}</b> к {row['time']} — ещё работает")
+            lines.append(f"{i}. <b>{row['name']}</b> к {row['time']}")
     text = "📊 <b>Итог смены</b>\n\n" + "\n".join(lines)
     text += f"\n\nЗавершили: {finished} из {len(rows)}"
     text += f"\nСуммарно отработано (с округлением): {format_work_duration(total_minutes)}"
